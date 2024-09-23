@@ -123,16 +123,24 @@ func (fw flushWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Standard net/http function. Shouldn't be used directly, http.Serve will use it.
 func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	//r.Header["X-Forwarded-For"] = w.RemoteAddr()
 	if r.Method == "CONNECT" {
 		proxy.handleHttps(w, r)
 	} else {
 		ctx := &ProxyCtx{Req: r, Session: atomic.AddInt64(&proxy.sess, 1), Proxy: proxy}
 
-		var err error
-		ctx.Logf("Got request %v %v %v %v", r.URL.Path, r.Host, r.Method, r.URL.String())
+		// Get the original IP address
+		originalIP := r.Header.Get("X-Forwarded-For")
+		if originalIP == "" {
+			// Fallback to RemoteAddr if no X-Forwarded-For header
+			originalIP = strings.Split(r.RemoteAddr, ":")[0]
+		} else {
+			// Split by comma and take the first IP
+			originalIP = strings.Split(originalIP, ",")[0]
+		}
+
+		ctx.Logf("Received request from original IP: %s, URL: %s", originalIP, r.URL.String())
+
 		if !r.URL.IsAbs() {
 			proxy.NonproxyHandler.ServeHTTP(w, r)
 			return
@@ -148,11 +156,10 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			if !proxy.KeepHeader {
 				removeProxyHeaders(ctx, r)
 			}
-			resp, err = ctx.RoundTrip(r)
+			resp, err := ctx.RoundTrip(r)
 			if err != nil {
 				ctx.Error = err
 				resp = proxy.filterResponse(nil, ctx)
-
 			}
 			if resp != nil {
 				ctx.Logf("Received response %v", resp.Status)
@@ -181,13 +188,8 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			}
 			return
 		}
+
 		ctx.Logf("Copying response to client %v [%d]", resp.Status, resp.StatusCode)
-		// http.ResponseWriter will take care of filling the correct response length
-		// Setting it now, might impose wrong value, contradicting the actual new
-		// body the user returned.
-		// We keep the original body to remove the header only if things changed.
-		// This will prevent problems with HEAD requests where there's no body, yet,
-		// the Content-Length header should be set.
 		if origBody != resp.Body {
 			resp.Header.Del("Content-Length")
 		}
@@ -195,7 +197,6 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(resp.StatusCode)
 		var copyWriter io.Writer = w
 		if w.Header().Get("content-type") == "text/event-stream" {
-			// server-side events, flush the buffered data to the client.
 			copyWriter = &flushWriter{w: w}
 		}
 
