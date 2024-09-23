@@ -1,4 +1,4 @@
-module github.com/elazarl/goproxy
+module github.com/gr3edydevel0per/goproxy
 
 go 1.18
 
